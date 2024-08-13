@@ -92,6 +92,8 @@
 #     configure_logging()
 #     uvicorn.run(application, host="0.0.0.0", port=8000)
 
+
+
 from fastapi import FastAPI, HTTPException, WebSocket, Request
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,7 +102,7 @@ from twilio.twiml.voice_response import VoiceResponse, Gather
 import logging
 import os
 import uuid
-import asyncio
+import openai  # Assuming OpenAI is used for LLM
 
 # Load environment variables
 print("WebSocket URL:", os.getenv("WEB_SOCKET_URL"))
@@ -108,6 +110,8 @@ print("WebSocket URL:", os.getenv("WEB_SOCKET_URL"))
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER = os.getenv("TWILIO_NUMBER")  # Your Twilio phone number
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+CUSTOM_PROMPT = os.getenv("CUSTOM_PROMPT", "You are a helpful assistant.")
 
 def create_twilio_client():
     return Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
@@ -123,6 +127,9 @@ def configure_logging():
 
     # Add the console handler to the logger
     logger.addHandler(console_handler)
+
+# Initialize OpenAI API client
+openai.api_key = OPENAI_API_KEY
 
 application = FastAPI()
 application.add_middleware(
@@ -153,8 +160,7 @@ async def voicebot_endpoint(websocket: WebSocket):
             data = await websocket.receive_bytes()  # Expect audio data
             logging.info(f"Received audio data of size: {len(data)} bytes")
 
-            # Here you would typically process the audio data, e.g., convert it to text
-            # For demonstration purposes, we'll just send a confirmation message
+            # Process audio data and respond
             response_text = "Audio received and processed"
             await websocket.send_text(response_text)
 
@@ -237,33 +243,58 @@ async def voice(request: Request):
             sessions[session_id]['conversation'].append({'assistant': "Goodbye! Ending the call."})
             response.hangup()
         else:
-            # Simulate a response from a language model (replace with your actual model call)
-            response_text = f"Response to: {user_speech}"
-            print(f"Model response: {response_text}")
+            # Combine the custom prompt with the user's speech
+            prompt = f"{CUSTOM_PROMPT}\nUser said: {user_speech}\nResponse:"
 
-            # Ensure the response is within a reasonable length
-            if not response_text:
-                response_text = "Sorry, I didn't catch that."
+            try:
+                # Call the LLM API
+                completion = openai.Completion.create(
+                    engine="text-davinci-003",  # Use the appropriate model engine
+                    prompt=prompt,
+                    max_tokens=150  # Adjust the number of tokens as needed
+                )
+                response_text = completion.choices[0].text.strip()
+                print(f"Model response: {response_text}")
 
-            answer = ' '.join(response_text.split()[:200])  # Ensure the response is within 200 characters
+                # Ensure the response is within a reasonable length
+                if not response_text:
+                    response_text = "Sorry, I didn't catch that."
 
-            # Store assistant's response in conversation history
-            sessions[session_id]['conversation'].append({'assistant': answer})
+                answer = ' '.join(response_text.split()[:200])  # Ensure the response is within 200 characters
 
-            # Respond with the assistant's answer and continue the conversation
-            response.say(answer, language='en-IN')
+                # Store assistant's response in conversation history
+                sessions[session_id]['conversation'].append({'assistant': answer})
 
-            # Gather user input again
-            gather = Gather(
-                input='speech',
-                timeout=10,
-                speechTimeout='auto',
-                action='/voice',
-                method='POST',
-                language='en-IN'
-            )
-            response.append(gather)
-            response.say("Please say something after the beep.", language='en-IN')
+                # Respond with the assistant's answer and continue the conversation
+                response.say(answer, language='en-IN')
+
+                # Gather user input again
+                gather = Gather(
+                    input='speech',
+                    timeout=10,
+                    speechTimeout='auto',
+                    action='/voice',
+                    method='POST',
+                    language='en-IN'
+                )
+                response.append(gather)
+                response.say("Please say something after the beep.", language='en-IN')
+
+            except Exception as e:
+                print(f"Error: {e}")
+                response.say("Sorry, there was an error processing your request. Please try again.", language='en-IN')
+
+                # Gather user input again
+                gather = Gather(
+                    input='speech',
+                    timeout=10,
+                    speechTimeout='auto',
+                    action='/voice',
+                    method='POST',
+                    language='en-IN'
+                )
+                response.append(gather)
+                response.say("Please say something after the beep.", language='en-IN')
 
     return Response(content=str(response), media_type='text/xml')
 
